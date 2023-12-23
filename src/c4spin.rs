@@ -6,17 +6,20 @@ pub const fn space_count() -> usize {
     BOARD_COLS * BOARD_ROWS
 }
 
-/// x and Y coordinates
-#[derive(Copy, Clone, Debug)]
+/// (x,y) coordinate pairs
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
 pub struct Move(pub usize, pub usize);
 
 pub type Board = [Player; space_count()];
 
 #[repr(u8)]
-#[derive(Copy, Clone, PartialEq, Debug)]
+#[derive(Copy, Clone, PartialEq, Debug, Eq, Hash)]
 pub enum Player {
+    /// represents an unassigned space or a tie between players
     None,
+    /// represents the player who has the first action
     One,
+    /// represents the player who has the second action
     Two,
 }
 
@@ -38,12 +41,12 @@ impl Player {
     }
 }
 
-pub struct Connect4Spin {
+pub struct Game {
     pub current_state: Board,
     pub turn: Player,
 }
 
-impl Connect4Spin {
+impl Game {
     pub fn new() -> Self {
         Self {
             current_state: [Player::None; space_count()],
@@ -53,7 +56,7 @@ impl Connect4Spin {
 
     fn check_winner(&self) -> Option<Player> {
         for player in [Player::One, Player::Two] {
-            // Check for a horizontal win
+            // check for a horizontal win
             for row in 0..BOARD_ROWS {
                 for col in 0..BOARD_COLS - 3 {
                     if self.current_state[Move(col, row).to_1d()] == player
@@ -66,7 +69,7 @@ impl Connect4Spin {
                 }
             }
 
-            // Check for a vertical win
+            // check for a vertical win
             for row in 0..BOARD_ROWS - 3 {
                 for col in 0..BOARD_COLS {
                     if self.current_state[Move(col, row).to_1d()] == player
@@ -79,7 +82,7 @@ impl Connect4Spin {
                 }
             }
 
-            // Check for a diagonal win (top-left to bottom-right)
+            // check for a diagonal win (top-left to bottom-right)
             for row in 0..BOARD_ROWS - 3 {
                 for col in 0..BOARD_COLS - 3 {
                     if self.current_state[Move(col, row).to_1d()] == player
@@ -92,7 +95,7 @@ impl Connect4Spin {
                 }
             }
 
-            // Check for a diagonal win (bottom-left to top-right)
+            // check for a diagonal win (bottom-left to top-right)
             for row in 3..BOARD_ROWS {
                 for col in 0..BOARD_COLS - 3 {
                     if self.current_state[Move(col, row).to_1d()] == player
@@ -106,50 +109,44 @@ impl Connect4Spin {
             }
         }
 
-        None
+        // check for a tie
+        self.current_state
+            .iter()
+            .all(|space| *space != Player::None)
+            .then_some(Player::None)
     }
 
     pub fn play(&mut self, pos: Move) -> anyhow::Result<Option<Player>> {
-        if pos.0 < BOARD_COLS && pos.1 < BOARD_ROWS {
-            // temporary hack to avoid stalling the game
-            if !matches!(self.current_state[pos.to_1d()], Player::None) {
-                eprintln!("{:?} was taken.", pos);
-
-                let mut placed = false;
-                for v in &mut self.current_state {
-                    if matches!(v, Player::None) {
-                        *v = self.turn;
-                        placed = true;
-                        break;
-                    }
-                }
-                if !placed {
-                    return Ok(Some(Player::None));
-                }
-            } else {
-                // set the player's move on the board
-                self.current_state[pos.to_1d()] = self.turn;
-            }
-            // make it the other player's turn
-            self.turn = self.turn.flip();
-            // randomly flip the column after playing
-            if rand::random() {
-                let temp: Vec<_> = (0..BOARD_ROWS)
-                    .map(|row| self.current_state[Move(pos.0, row).to_1d()])
-                    .collect();
-                for (index, v) in temp.into_iter().rev().enumerate() {
-                    self.current_state[Move(pos.0, index).to_1d()] = v;
-                }
-            }
-            // if there is win, then return it
-            return Ok(self.check_winner());
-        } else {
-            Err(anyhow::anyhow!("{:?} is out of bounds.", pos))
+        // bounds check
+        if self.current_state.get(pos.to_1d()).is_none() {
+            anyhow::bail!("{:?} is out of bounds", pos);
         }
+        // temporary hack to avoid stalling the game
+        if let Some(p @ (Player::One | Player::Two)) = self.current_state.get(pos.to_1d()) {
+            anyhow::bail!("{:?} already belongs to {:?}", pos, p);
+        }
+        // set the player's move on the board
+        self.current_state[pos.to_1d()] = self.turn;
+        // make it the other player's turn
+        self.turn = self.turn.flip();
+        // randomly flip the column after playing
+        // TODO: use some extra logic based on the weight of the chips to control the flip chance
+        if rand::random() {
+            // create a temporary copy of the column
+            let temp: Vec<_> = (0..BOARD_ROWS)
+                .map(|row| self.current_state[Move(pos.0, row).to_1d()])
+                .collect();
+            // apply the reveresed copy onto the column
+            for (index, v) in temp.into_iter().rev().enumerate() {
+                self.current_state[Move(pos.0, index).to_1d()] = v;
+            }
+        }
+        // check if there is winner or a tie
+        Ok(self.check_winner())
     }
 }
 
-impl Display for Connect4Spin {
+impl Display for Game {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for y in 0..BOARD_ROWS {
             write!(f, "{}", y + 1)?;
@@ -166,6 +163,7 @@ impl Display for Connect4Spin {
 
         write!(f, " ")?;
         for x in 0..BOARD_COLS {
+            // unicode characters are 2 wide
             write!(f, "{:2}", char::from_u32(x as u32 + 97).unwrap())?;
         }
         Ok(())
@@ -174,11 +172,11 @@ impl Display for Connect4Spin {
 
 #[cfg(test)]
 mod test {
-    use super::{Connect4Spin, Move};
+    use super::{Game, Move};
 
     #[test]
     fn test() {
-        let mut game = Connect4Spin::new();
+        let mut game = Game::new();
         let player1_moves = [Move(0, 0)];
         let player2_moves = [Move(0, 1)];
         for player_move in player1_moves

@@ -2,9 +2,11 @@
 
 An ML experiment on Connect 4 Spin
 
-## Demo
+## Example
 
 ```
+> cargo r --release
+
 🧠 Training model..
 Epoch:    11 | Loss:  0.03393
 Epoch:    20 | Loss:  0.02065
