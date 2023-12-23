@@ -17,6 +17,17 @@ trait Model {
 }
 
 #[allow(dead_code)]
+enum TrainingMode {
+    Epoch(usize),
+    TargetLoss(f32, Option<usize>),
+}
+
+#[derive(Default)]
+struct Stats {
+    winners: HashMap<c4spin::Player, usize>,
+    first_moves: HashMap<c4spin::Move, usize>,
+}
+
 struct TrainingSession {
     states: Vec<(Tensor, Tensor)>,
     logs: Vec<(c4spin::Player, c4spin::Board, c4spin::Move)>,
@@ -29,14 +40,19 @@ pub fn main() -> anyhow::Result<()> {
     let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
     let model = models::mlp::MLP::new(vs)?;
     if Path::new(MODEL_FILE).exists() {
-        println!("📦 Loading vars..");
+        println!("📦 loading existing model parameters..");
         varmap.load(MODEL_FILE)?;
     }
-    println!("🧠 Training model..");
-    train(&model, &varmap, &device)?;
-    println!("💾 Saving model..");
+    println!("🧠 training model..");
+    train(
+        TrainingMode::TargetLoss(0.001, Some(100)),
+        &model,
+        &varmap,
+        &device,
+    )?;
+    println!("💾 saving model..");
     varmap.save(MODEL_FILE)?;
-    println!("🎮 Creating game with model..");
+    println!("🎮 creating game with model..");
     play(&model, &device)
 }
 
@@ -51,19 +67,22 @@ fn play(model: &impl Model, device: &Device) -> anyhow::Result<()> {
             break winner;
         }
     };
-    println!("🥳 Player [{:?}] Won!", winner);
+    println!("🥳 player [{:?}] Won!", winner);
     println!("{}", game);
     Ok(())
 }
 
-fn train(model: &impl Model, varmap: &VarMap, device: &Device) -> anyhow::Result<()> {
+fn train(
+    mode: TrainingMode,
+    model: &impl Model,
+    varmap: &VarMap,
+    device: &Device,
+) -> anyhow::Result<()> {
     let mut sgd = candle_nn::SGD::new(varmap.all_vars(), LEARNING_RATE)?;
-
+    let mut stats = Stats::default();
     let mut step_count = 0u32;
-    let mut winners = HashMap::new();
-    let mut first_moves = HashMap::new();
 
-    loop {
+    let mut train_iter = |stats: &mut Stats| -> anyhow::Result<f32> {
         let TrainingSession {
             states,
             winner,
@@ -71,18 +90,24 @@ fn train(model: &impl Model, varmap: &VarMap, device: &Device) -> anyhow::Result
         } = self_play_session(model, device)?;
 
         #[cfg(debug_assertions)]
-        for ele in &logs {
+        logs.iter().for_each(|&(turn, current_state, _)| {
             println!(
                 "{}",
                 c4spin::Game {
-                    current_state: ele.1,
-                    turn: ele.0
+                    current_state,
+                    turn
                 }
             )
-        }
+        });
 
-        winners.entry(winner).and_modify(|v| *v += 1).or_insert(1);
-        first_moves
+        // statistics
+        stats
+            .winners
+            .entry(winner)
+            .and_modify(|v| *v += 1)
+            .or_insert(1);
+        stats
+            .first_moves
             .entry(logs[0].2)
             .and_modify(|v| *v += 1)
             .or_insert(1);
@@ -105,15 +130,35 @@ fn train(model: &impl Model, varmap: &VarMap, device: &Device) -> anyhow::Result
             final_loss.replace(loss);
         }
 
-        if let Some(loss) = final_loss {
-            if loss.to_scalar::<f32>()? < 0.0001 {
-                break;
+        let Some(loss) = final_loss else {
+            anyhow::bail!("no loss for iteration");
+        };
+
+        Ok(loss.to_scalar::<f32>()?)
+    };
+
+    match mode {
+        TrainingMode::TargetLoss(target_loss, checkpoint_freq @ _) => {
+            if let Some(freq) = checkpoint_freq {
+                println!("🚩 checkpointing model every {} iterations..", freq);
+            }
+            let mut iter = 0usize;
+            while train_iter(&mut stats)? > target_loss {
+                iter += 1;
+                if checkpoint_freq.is_some_and(|freq| iter.rem_euclid(freq) == 0) {
+                    varmap.save(MODEL_FILE)?;
+                }
+            }
+        }
+        TrainingMode::Epoch(epochs) => {
+            for _ in 1..=epochs {
+                train_iter(&mut stats)?;
             }
         }
     }
 
-    println!("wins by turn: {:#?}", winners);
-    println!("first move frequency: {:#?}", first_moves);
+    println!("wins by turn: {:#?}", stats.winners);
+    println!("first move frequency: {:#?}", stats.first_moves);
 
     Ok(())
 }
@@ -187,7 +232,7 @@ fn create_answer_tensor(
     for (index, value) in board.iter_mut().enumerate() {
         if index == pmove.to_1d() {
             // rule of this, that the game can be ended in 7 turns max
-            *value = 7.0 / turn_count as f32;
+            *value = 20.0 / turn_count as f32;
         } else if state[index] == c4spin::Player::None {
             *value = 0.0
         }
