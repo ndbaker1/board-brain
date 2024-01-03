@@ -1,6 +1,6 @@
-# c4spinner
+# Board-Brain
 
-An ML experiment on Connect 4 Spin
+Training Models to play simple 2P board games
 
 ## Example
 
